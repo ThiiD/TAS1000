@@ -107,14 +107,468 @@ bool subiu = false;
 //Arrays de som de erro;
 
 
+void inicializa() {
+  
+  //Inicializando as portas
+  pinMode(PINO_BOTAO, INPUT);
+  pinMode(PINO_BUZZER, OUTPUT);
+  pinMode(PINO_LED_VERD, OUTPUT);
+  pinMode(PINO_LED_VERM, OUTPUT);
+  pinMode(PINO_LED_AZUL, OUTPUT);
+//  ledcSetup(0, 1E5, 12);
+//  ledcAttachPin(PINO_BUZZER, 0);
 
 
+  LoRa.setPins(ss, rst, dio0);
+
+  //iniciando o servo
+  pinMode(REC1_PRINCIPAL, OUTPUT);
+  digitalWrite(REC1_PRINCIPAL, LOW);
+  pinMode(REC1_SECUNDARIO, OUTPUT);
+  digitalWrite(REC1_SECUNDARIO, LOW);
+  pinMode(REC_SOLENOIDE, OUTPUT);
+  digitalWrite(REC_SOLENOIDE, LOW);
+  erro = 0;
+
+  //Inicializando o Altímetro
+  if (!bmp.begin(0x76)) {
+    erro = ERRO_BMP;
+  }
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+  //Inicializando o GPS
+  SerialGPS.begin(9600, SERIAL_8N1, 16, 17);
+
+  alturaInicial_GPS = gps.altitude.meters();
+  alturaInicial =  bmp.readAltitude(PRESSAO_MAR);
+  alturaMinima = alturaInicial;
+
+  //iniciar o IMU
+
+
+
+  //inicializar LoRa
+  if (!LoRa.begin(915E6))
+  {
+    erro = ERRO_LORA;
+
+    return;
+  }
+
+
+
+
+  LoRa.setSyncWord(0xF3);
+  if (!erro) {
+#ifdef DEBUG
+    Serial.println("Nenhum erro iniciando dispositivos, começando o loop do main");
+#endif
+    statusAtual = ESTADO_ESPERA;
+  }
+
+  else {
+#ifdef DEBUG
+    Serial.print("Altímetro com erro de inicialização código:");
+    Serial.println(erro);
+#endif
+    statusAtual = erro;
+
+    atualizaMillis = millis();
+  }
+
+
+}
+void leBotoes() {
+
+  millisAtual = millis();
+  estado = digitalRead(PINO_BOTAO);
+
+  //Liga a gravação se em espera
+  if (estado && (statusAtual == ESTADO_ESPERA)) {
+    statusAtual = ESTADO_GRAVANDO;
+
+
+  }
+}
+void adquireDados() {
+
+  //todas as medidas são feitas aqui em sequeência de maneira que os valores
+  //sejam temporalmente próximos
+  pressaoAtual = bmp.readPressure();
+  alturaAtual = bmp.readAltitude(PRESSAO_MAR);
+  temperaturaAtual = bmp.readTemperature();
+
+  while (SerialGPS.available() > 0) {
+    gps.encode(SerialGPS.read());
+  }
+  latitude =  gps.location.lat();
+  longitude =  gps.location.lng();
+  alturaAtualGPS = gps.altitude.meters();
+
+}
+
+void checaCondicoes() {
+
+  if ((statusAtual == ESTADO_GRAVANDO) && !gravando ) {
+    alturaMinima = alturaAtual;
+    gravando = true;
+  }
+
+  if (!alturaInicial_GPS && alturaAtualGPS != 0)
+    alturaInicial_GPS = alturaAtualGPS;
+
+  //alturaMinima BMP
+  if ((alturaAtual < alturaMinima) && (statusAtual == ESTADO_GRAVANDO))
+    alturaMinima = alturaAtual;
+
+  //alturaMaxima BMP
+  if (!subiu && (statusAtual == ESTADO_GRAVANDO))
+    alturaMaxima = 0;
+
+  //controle de subida BMP
+  if ((alturaAtual > alturaMinima + THRESHOLD_SUBIDA) && (statusAtual == ESTADO_GRAVANDO) && !subiu )
+    subiu = true;
+
+  //primeira referencia de altura maxima
+  if (subiu && (alturaMaxima == 0) && (statusAtual == ESTADO_GRAVANDO))
+    alturaMaxima = alturaAtual;
+
+  //verificar a altura máxima BMP
+  if ((alturaAtual > alturaMaxima) && (statusAtual == ESTADO_GRAVANDO) && subiu)
+    alturaMaxima =  alturaAtual;
+
+
+  if ((alturaAtualGPS > alturaMaximaGPS) && (statusAtual == ESTADO_GRAVANDO) && subiu)
+    alturaMaximaGPS = alturaAtualGPS;
+
+  //Controle de descida do primeiro estágio, usando um threshold para evitar disparos não
+  //intencionais
+  if ((alturaAtual + THRESHOLD_DESCIDA < alturaMaxima) && (statusAtual == ESTADO_GRAVANDO) && subiu) {
+    descendo = true;
+    subiu = false;
+    statusAtual = ESTADO_RECUPERANDO;
+  }
+
+  //Controle de descida do segundo estágio de recuperação
+  if ((alturaAtual - alturaInicial < THRESHOLD_SOLENOIDE) && descendo)
+  {
+    descendo_Solenoide = true;
+
+    if (alturaInicial_GPS != 0 )
+      if ((alturaAtualGPS - alturaInicial_GPS <  THRESHOLD_SOLENOIDE_GPS ) && descendo  && (alturaAtualGPS - alturaInicial_GPS > 0))
+        descendo_Solenoide = true;
+  }
+
+}
+
+void finaliza() {
+}
+
+void recupera () {
+
+  //verifica aqui se o foguete já atingiu o apogeu e se está descendo pelas
+  //suas variáveis globais de controle e chama a função que faz o acionamento
+  //do paraquedas
+  if (descendo && !abriuParaquedas) {
+
+    abreParaquedas();
+
+  }
+
+  if (descendo_Solenoide && !abriuSolenoide)
+  {
+    abreSolenoide();
+  }
+
+
+
+}
+
+void notifica (char codigo) {
+
+  unsigned int frequencia[10];
+#ifdef DEBUG
+  Serial.print("Status atual do altímetro:");
+  Serial.println(codigo);
+#endif
+
+  switch (codigo) {
+    case ERRO_BMP:
+
+      frequencia[0] = 261;
+      frequencia[1] = 261;
+      frequencia[2] = 0;
+      frequencia[3] = 0;
+      frequencia[4] = 220;
+      frequencia[5] = 220;
+      frequencia[6] = 0;
+      frequencia[7] = 0;
+      frequencia[8] = 196;
+      frequencia[9] = 196;
+      if (millisAtual - millisLed > 100) {
+        digitalWrite(PINO_LED_AZUL, !digitalRead(PINO_LED_AZUL));
+        digitalWrite(PINO_LED_VERD, LOW);
+        digitalWrite(PINO_LED_VERM, LOW);
+        millisLed = millisAtual;
+      }
+
+      break;
+    case ERRO_LORA:
+      frequencia[0] = 261;
+      frequencia[1] = 261;
+      frequencia[2] = 0;
+      frequencia[3] = 0;
+      frequencia[4] = 220;
+      frequencia[5] = 220;
+      frequencia[6] = 0;
+      frequencia[7] = 0;
+      frequencia[8] = 196;
+      frequencia[9] = 196;
+      if (millisAtual - millisLed > 100) {
+        digitalWrite(PINO_LED_VERM, !digitalRead(PINO_LED_VERM));
+        digitalWrite(PINO_LED_AZUL, LOW);
+        digitalWrite(PINO_LED_VERD, LOW);
+        millisLed = millisAtual;
+      }
+      break;
+    case ESTADO_RECUPERANDO:
+
+      frequencia[0] = 4000;
+      frequencia[1] = 4500;
+      frequencia[2] = 4000;
+      frequencia[3] = 0;
+      frequencia[4] = 0;
+      frequencia[5] = 0;
+      frequencia[6] = 0;
+      frequencia[7] = 0;
+      frequencia[8] = 0;
+      frequencia[9] = 0;
+      if (millisAtual - millisLed > 100) {
+        digitalWrite(PINO_LED_VERD, !digitalRead(PINO_LED_VERD));
+        digitalWrite(PINO_LED_AZUL, LOW);
+        digitalWrite(PINO_LED_VERM, LOW);
+        millisLed = millisAtual;
+      }
+
+      break;
+
+    //Gravando, pisca um led vermelho como uma câmera e também faz
+    //um tom simples.
+    case ESTADO_GRAVANDO:
+
+      frequencia[0] = 293;
+      frequencia[1] = 293;
+      frequencia[2] = 0;
+      frequencia[3] = 0;
+      frequencia[4] = 0;
+      frequencia[5] = 0;
+      frequencia[6] = 0;
+      frequencia[7] = 0;
+      frequencia[8] = 0;
+      frequencia[9] = 0;
+      if (millisAtual - millisLed > 100) {
+        digitalWrite(PINO_LED_AZUL, !digitalRead(PINO_LED_AZUL));
+        digitalWrite(PINO_LED_VERD, LOW);
+        digitalWrite(PINO_LED_VERM, LOW);
+        millisLed = millisAtual;
+      }
+
+      break;
+    case ESTADO_ESPERA:
+      //led verde piscando devagar indicando espera
+      if (millisAtual - millisLed > 500) {
+        digitalWrite(PINO_LED_VERD, !digitalRead(PINO_LED_VERD));
+        millisLed = millisAtual;
+      }
+
+
+      break;
+
+  }
+//    if (codigo) {
+//      if (frequencia[o] && (statusAtual != ESTADO_ESPERA)) {
+//       // tone(PINO_BUZZER, frequencia[o], TEMPO_ATUALIZACAO);
+//      }
+//      o++;
+//      if (o > 9)
+//        o = 0;
+//  }
+
+}
+
+void abreParaquedas() {
+#ifdef DEBUG
+  Serial.println("Abrindo o paraquedas!");
+#endif
+  digitalWrite(REC1_PRINCIPAL, HIGH);
+  millisRec = millis();
+  abriuParaquedas = 1;
+
+  LoRa.beginPacket();
+  LoRa.print("K");
+  LoRa.print(testeParaquedas);
+  LoRa.endPacket();
+
+}
+void abreSolenoide() {
+#ifdef DEBUG
+  Serial.println("Abrindo solenoide!");
+#endif
+  digitalWrite(REC_SOLENOIDE, HIGH);
+  abriuSolenoide = 1;
+
+  LoRa.beginPacket();
+  LoRa.print("S");
+  LoRa.print(testeParaquedas);
+  LoRa.endPacket();
+}
+void envia() {
+  if ((statusAtual == ESTADO_GRAVANDO) && !gravando ){
+  
+  latitudeLora = (long) (latitude * 1000000);
+  longitudeLora = (long) (longitude * 1000000);
+  alturaGpsLora = (long) (alturaAtualGPS * 1000000);
+  alturaBMPLora = (long) (alturaAtual * 1000000);
+  millisAtualLora = (long) (millisAtual);
+
+    
+  if (latitudeLora != 0) {
+    LoRa.beginPacket();
+    LoRa.print("L");
+    LoRa.print(latitudeLora);
+    LoRa.endPacket();
+  }
+  if (longitudeLora != 0) {
+    LoRa.beginPacket();
+    LoRa.print("M");
+    LoRa.print(longitudeLora);
+    LoRa.endPacket();
+  }
+  if (alturaGpsLora != 0) {
+    LoRa.beginPacket();
+    LoRa.print("A");
+    LoRa.print(alturaGpsLora);
+    LoRa.endPacket();
+  }
+  LoRa.beginPacket();
+  LoRa.print("H");
+  LoRa.print(alturaBMPLora);
+  LoRa.endPacket();
+
+  LoRa.beginPacket();
+  LoRa.print("T");
+  LoRa.print(millisAtualLora);
+  LoRa.endPacket();
+
+}
+}
 
 void setup() {
-  // put your setup code here, to run once:
+
+#ifdef DEBUG
+  Serial.begin(115200);
+#endif
+
+#ifdef DEBUG_TEMP
+  Serial.begin(115200);
+
+#endif
+  //Faz o setup inicial dos sensores de movimento e altura assim
+  //como as portas
+
+#ifdef DEBUG
+  Serial.println("Iniciando o altímetro");
+#endif
+
+  inicializa();
+
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+
+  //Recebendo o tempo atual de maneira a ter uma base de tempo
+  //para uma taxa de atualização
+  millisAtual = millis();
+
+  if ((millis() - millisRec >= TEMPO_RELE) && abriuParaquedas) {
+    digitalWrite(REC1_PRINCIPAL, LOW); //COMENTAR LINHA CASO NÃO FOR NECESSÁRIO
+    digitalWrite(REC1_SECUNDARIO, HIGH);
+  }
+
+
+
+  if ((millisAtual - atualizaMillis) >= TEMPO_ATUALIZACAO) {
+#ifdef DEBUG_TEMP
+    Serial.print("Status atual:");
+    Serial.println(statusAtual);
+    Serial.print("estado atual de erro:");
+    Serial.println(erro);
+#endif
+    //verifica se existem erros e mantém tentando inicializar
+    if (erro) {
+      inicializa();
+      notifica(erro);
+    }
+
+    //Se não existem erros no sistema relacionados a inicialização
+    //dos dispositivos, fazer:
+
+    if (!erro) {
+
+#ifdef DEBUG
+      Serial.println("Rodando o loop de funções");
+#endif
+
+      //Verifica os botões e trata o clique simples e o clique longo
+      //como controle de início/fim da gravação.
+      leBotoes();
+
+#ifdef DEBUG
+      Serial.println("Li os botões");
+#endif
+
+      //Recebe os dados dos sensores e os deixa salvo em variáveis
+      adquireDados();
+#ifdef DEBUG
+      Serial.println("Adquiri os dados");
+#endif
+
+      //Trata os dados, fazendo filtragens e ajustes.
+#ifdef DEBUG
+      Serial.println("Tratei os dados");
+#endif
+
+      //Envia dados para o receptor no chão
+      envia();
+#ifdef DEBUG
+      Serial.println("Enviei os Dados");
+#endif
+
+
+      //De acordo com os dados recebidos, verifica condições como a
+      //altura máxima atingida e seta variáveis de controle de modo
+      //que ações consequintes sejam tomadas.
+      checaCondicoes();
+
+      //Faz ajustes finais necessários
+      finaliza();
+
+      //Caso o voo tenha chegado ao ápice, libera o sistema de recuperação
+      recupera();
+    }
+
+    //Notifica via LEDs e buzzer problemas com o foguete
+    notifica(statusAtual);
+
+    atualizaMillis = millisAtual;
+  }
+
+
+
+
+
 }
 
