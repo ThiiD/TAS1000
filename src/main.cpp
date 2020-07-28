@@ -425,43 +425,46 @@ void abreSolenoide() {
   LoRa.print(testeParaquedas);
   LoRa.endPacket();
 }
-void envia() {
-  if ((statusAtual == ESTADO_GRAVANDO) && !gravando ){
+void envia(void*z) {
+  while (true){
+    if ((statusAtual == ESTADO_GRAVANDO) && !gravando ){
   
-  latitudeLora = (long) (latitude * 1000000);
-  longitudeLora = (long) (longitude * 1000000);
-  alturaGpsLora = (long) (alturaAtualGPS * 1000000);
-  alturaBMPLora = (long) (alturaAtual * 1000000);
-  millisAtualLora = (long) (millisAtual);
+    latitudeLora = (long) (latitude * 1000000);
+    longitudeLora = (long) (longitude * 1000000);
+    alturaGpsLora = (long) (alturaAtualGPS * 1000000);
+    alturaBMPLora = (long) (alturaAtual * 1000000);
+    millisAtualLora = (long) (millisAtual);
 
-    
-  if (latitudeLora != 0) {
+      
+    if (latitudeLora != 0) {
+      LoRa.beginPacket();
+      LoRa.print("L");
+      LoRa.print(latitudeLora);
+      LoRa.endPacket();
+    }
+    if (longitudeLora != 0) {
+      LoRa.beginPacket();
+      LoRa.print("M");
+      LoRa.print(longitudeLora);
+      LoRa.endPacket();
+    }
+    if (alturaGpsLora != 0) {
+      LoRa.beginPacket();
+      LoRa.print("A");
+      LoRa.print(alturaGpsLora);
+      LoRa.endPacket();
+    }
     LoRa.beginPacket();
-    LoRa.print("L");
-    LoRa.print(latitudeLora);
+    LoRa.print("H");
+    LoRa.print(alturaBMPLora);
     LoRa.endPacket();
-  }
-  if (longitudeLora != 0) {
-    LoRa.beginPacket();
-    LoRa.print("M");
-    LoRa.print(longitudeLora);
-    LoRa.endPacket();
-  }
-  if (alturaGpsLora != 0) {
-    LoRa.beginPacket();
-    LoRa.print("A");
-    LoRa.print(alturaGpsLora);
-    LoRa.endPacket();
-  }
-  LoRa.beginPacket();
-  LoRa.print("H");
-  LoRa.print(alturaBMPLora);
-  LoRa.endPacket();
 
-  LoRa.beginPacket();
-  LoRa.print("T");
-  LoRa.print(millisAtualLora);
-  LoRa.endPacket();
+    LoRa.beginPacket();
+    LoRa.print("T");
+    LoRa.print(millisAtualLora);
+    LoRa.endPacket();
+  }
+
 
 }
 }
@@ -482,7 +485,7 @@ void setup() {
 #ifdef DEBUG
   Serial.println("Iniciando o altímetro");
 #endif
-
+  xTaskCreatePinnedToCore(envia, "envia", 8192, NULL, 1, NULL, 0);
   inicializa();
 
 }
@@ -542,10 +545,10 @@ void loop() {
 #endif
 
       //Envia dados para o receptor no chão
-      envia();
+/*       envia();
 #ifdef DEBUG
       Serial.println("Enviei os Dados");
-#endif
+#endif */
 
 
       //De acordo com os dados recebidos, verifica condições como a
